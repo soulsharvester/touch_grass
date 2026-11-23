@@ -1,4 +1,4 @@
-import type { GameCallbacks, ShopItem, ToolId } from "./types.js";
+import type { GameCallbacks, ShopItem, ToolId, VehicleId } from "./types.js";
 
 export class UI {
   private readonly menu = this.required<HTMLElement>("#menu-screen");
@@ -16,6 +16,7 @@ export class UI {
     this.required<HTMLButtonElement>("#shop-open").addEventListener("click", () => this.setShopOpen(true));
     this.required<HTMLButtonElement>("#fire-tool").addEventListener("click", callbacks.fire);
     this.required<HTMLButtonElement>("#mobile-fire").addEventListener("click", callbacks.fire);
+    this.required<HTMLButtonElement>("#perspective-toggle").addEventListener("click", callbacks.togglePerspective);
 
     for (const closeButton of document.querySelectorAll<HTMLButtonElement>("[data-close='shop']")) {
       closeButton.addEventListener("click", () => this.setShopOpen(false));
@@ -70,7 +71,6 @@ export class UI {
     const minutes = Math.floor(elapsedSeconds / 60).toString().padStart(2, "0");
     const seconds = Math.floor(elapsedSeconds % 60).toString().padStart(2, "0");
     this.required<HTMLElement>("#time-played").textContent = `${minutes}:${seconds}`;
-    this.required<HTMLElement>("#shop-balance").textContent = blades.toLocaleString();
   }
 
   updateShop(items: ShopItem[]): void {
@@ -104,16 +104,31 @@ export class UI {
     }
   }
 
-  setVehicleMode(active: boolean): void {
-    this.required<HTMLElement>("#vehicle-badge").classList.toggle("is-hidden", !active);
+  setVehicleMode(vehicle: VehicleId | null): void {
+    const badge = this.required<HTMLElement>("#vehicle-badge");
+    badge.classList.toggle("is-hidden", !vehicle);
+    if (vehicle) {
+      const labels: Record<VehicleId, string> = { car: "ROAD TRIP", gunner: "GRASS ROVER", tank: "FIELD TANK" };
+      badge.textContent = labels[vehicle];
+    }
   }
 
-  setToolAvailable(available: boolean): void {
+  setToolAvailable(label: string | null): void {
     const desktop = this.required<HTMLButtonElement>("#fire-tool");
     const mobile = this.required<HTMLButtonElement>("#mobile-fire");
-    desktop.classList.toggle("is-hidden", !available);
-    desktop.classList.toggle("is-visible", available);
-    mobile.classList.toggle("is-hidden", !available);
+    desktop.classList.toggle("is-hidden", !label);
+    mobile.classList.toggle("is-hidden", !label);
+    if (label) {
+      desktop.innerHTML = `${label} <kbd>LMB</kbd><kbd>F</kbd>`;
+      mobile.textContent = label;
+    }
+  }
+
+  setPerspective(firstPerson: boolean): void {
+    const button = this.required<HTMLButtonElement>("#perspective-toggle");
+    button.innerHTML = `${firstPerson ? "3RD" : "1ST"} <kbd>P</kbd>`;
+    button.setAttribute("aria-label", `Switch to ${firstPerson ? "third" : "first"}-person view`);
+    this.required<HTMLElement>("#first-person-hud").classList.toggle("is-hidden", !firstPerson);
   }
 
   announce(message: string): void {
@@ -128,6 +143,9 @@ export class UI {
       shears: "✂",
       car: "↗",
       blaster: "◎",
+      rocket: "➤",
+      gunner: "◎",
+      tank: "▦",
     };
     return icons[id];
   }

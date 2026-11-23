@@ -13,12 +13,13 @@ npm run dev
 
 - **WASD / arrow keys**: Move
 - **Space**: Jump; landing and movement both harvest grass
-- **E**: Enter or leave the car after buying it
-- **F**: Fire the grass popper after buying it
+- **P**: Switch between first- and third-person views
+- **E**: Enter or leave an owned vehicle
+- **Left click / F**: Punch or fire an equipped weapon
 - **Escape**: Pause or resume
 - **Field shop**: Buy and equip tools with collected blades
 
-The field streams in as you explore, and cleared grass grows back after a short while. Items arrive by drone; walk up to the dropped package to collect your purchase.
+The field streams in as you explore, and cleared grass tumbles away before growing back. Items arrive by drone; walk up to the dropped package to collect your purchase. The shop includes gloves, snippers, a grass blaster, a rocket launcher, a car, a gunner car, and a tank.
 
 ## Publish with GitHub Pages
 

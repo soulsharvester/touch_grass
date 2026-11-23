@@ -7,6 +7,14 @@ interface GrassBlade {
   width: number;
   value: number;
   regrowAt: number;
+  knockedAt: number;
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  rotationX: number;
+  rotationY: number;
+  rotationZ: number;
+  spinX: number;
+  spinZ: number;
   active: boolean;
 }
 
@@ -24,7 +32,7 @@ export interface HarvestResult {
 const CHUNK_SIZE = 48;
 const BLADES_PER_CHUNK = 300;
 const CHUNK_RADIUS = 1;
-const REGROW_DELAY = 9_000;
+const REGROW_DELAY = 10_000;
 
 export class GrassField {
   private readonly chunks = new Map<string, GrassChunk>();
@@ -56,22 +64,55 @@ export class GrassField {
     }
   }
 
-  updateRegrowth(now: number): void {
+  updateRegrowth(now: number, delta: number): void {
     for (const chunk of this.chunks.values()) {
       let changed = false;
       for (let index = 0; index < chunk.blades.length; index += 1) {
         const blade = chunk.blades[index];
-        if (blade.active || now < blade.regrowAt) continue;
+        if (blade.active) continue;
 
-        blade.active = true;
-        this.setBladeMatrix(chunk.grass, index, blade);
+        if (now >= blade.regrowAt) {
+          blade.active = true;
+          blade.knockedAt = 0;
+          blade.position.set(blade.x, blade.height / 2, blade.z);
+          blade.velocity.set(0, 0, 0);
+          blade.rotationX = 0;
+          blade.rotationZ = 0;
+          this.setBladeMatrix(chunk.grass, index, blade);
+          changed = true;
+          continue;
+        }
+
+        if (blade.knockedAt === 0) continue;
+        blade.position.addScaledVector(blade.velocity, delta);
+        blade.velocity.y -= 9.8 * delta;
+        const floor = blade.height / 2;
+        if (blade.position.y < floor) {
+          blade.position.y = floor;
+          blade.velocity.y = Math.abs(blade.velocity.y) * 0.22;
+          blade.velocity.x *= 0.72;
+          blade.velocity.z *= 0.72;
+          if (blade.velocity.y < 0.55) blade.velocity.y = 0;
+        }
+        blade.velocity.x *= Math.exp(-0.4 * delta);
+        blade.velocity.z *= Math.exp(-0.4 * delta);
+        blade.rotationX += blade.spinX * delta;
+        blade.rotationZ += blade.spinZ * delta;
+        const age = now - blade.knockedAt;
+        const fade = Math.max(0, 1 - Math.max(0, age - 3_800) / 1_500);
+        this.setBladeMatrix(chunk.grass, index, blade, fade);
         changed = true;
       }
       if (changed) chunk.grass.instanceMatrix.needsUpdate = true;
     }
   }
 
-  harvestNear(position: THREE.Vector3, radius: number, force: number): HarvestResult {
+  harvestNear(
+    position: THREE.Vector3,
+    radius: number,
+    force: number,
+    pushDirection?: THREE.Vector3,
+  ): HarvestResult {
     const radiusSquared = radius * radius;
     let count = 0;
     let blades = 0;
@@ -82,16 +123,14 @@ export class GrassField {
         const blade = chunk.blades[index];
         if (!blade.active) continue;
 
-        const dx = blade.x - position.x;
-        const dz = blade.z - position.z;
+        const dx = blade.position.x - position.x;
+        const dz = blade.position.z - position.z;
         if (dx * dx + dz * dz > radiusSquared) continue;
 
         blade.active = false;
         blade.regrowAt = performance.now() + REGROW_DELAY;
-        this.dummy.position.set(blade.x, -1, blade.z);
-        this.dummy.scale.setScalar(0);
-        this.dummy.updateMatrix();
-        chunk.grass.setMatrixAt(index, this.dummy.matrix);
+        this.kickBlade(blade, position, force, pushDirection);
+        this.setBladeMatrix(chunk.grass, index, blade);
         chunkHarvested = true;
         count += 1;
         blades += Math.max(1, Math.round(blade.value * force));
@@ -102,9 +141,8 @@ export class GrassField {
     return { count, blades };
   }
 
-  harvestShot(origin: THREE.Vector3, direction: THREE.Vector3): HarvestResult {
+  findShotTarget(origin: THREE.Vector3, direction: THREE.Vector3, maxDistance = 24): THREE.Vector3 | null {
     let nearest: { chunk: GrassChunk; index: number; distance: number } | undefined;
-    const maxDistance = 18;
     const maxSpread = 1.15;
 
     for (const chunk of this.chunks.values()) {
@@ -112,8 +150,8 @@ export class GrassField {
         const blade = chunk.blades[index];
         if (!blade.active) continue;
 
-        const dx = blade.x - origin.x;
-        const dz = blade.z - origin.z;
+        const dx = blade.position.x - origin.x;
+        const dz = blade.position.z - origin.z;
         const along = dx * direction.x + dz * direction.z;
         if (along < 0 || along > maxDistance) continue;
 
@@ -126,18 +164,8 @@ export class GrassField {
       }
     }
 
-    if (!nearest) return { count: 0, blades: 0 };
-
-    const blade = nearest.chunk.blades[nearest.index];
-    blade.active = false;
-    blade.regrowAt = performance.now() + REGROW_DELAY;
-    this.dummy.position.set(blade.x, -1, blade.z);
-    this.dummy.scale.setScalar(0);
-    this.dummy.updateMatrix();
-    nearest.chunk.grass.setMatrixAt(nearest.index, this.dummy.matrix);
-    nearest.chunk.grass.instanceMatrix.needsUpdate = true;
-
-    return { count: 1, blades: Math.max(2, Math.round(blade.value * 3)) };
+    if (!nearest) return null;
+    return nearest.chunk.blades[nearest.index].position.clone();
   }
 
   clear(): void {
@@ -190,6 +218,14 @@ export class GrassField {
         width,
         value: height * 2 + random(),
         regrowAt: 0,
+        knockedAt: 0,
+        position: new THREE.Vector3(x, height / 2, z),
+        velocity: new THREE.Vector3(),
+        rotationX: 0,
+        rotationY: (x * 17 + z * 13) % Math.PI,
+        rotationZ: 0,
+        spinX: 0,
+        spinZ: 0,
         active: true,
       };
 
@@ -215,10 +251,29 @@ export class GrassField {
     }
   }
 
-  private setBladeMatrix(mesh: THREE.InstancedMesh, index: number, blade: GrassBlade): void {
-    this.dummy.position.set(blade.x, blade.height / 2, blade.z);
-    this.dummy.scale.set(blade.width, blade.height, blade.width);
-    this.dummy.rotation.y = (blade.x * 17 + blade.z * 13) % Math.PI;
+  private kickBlade(blade: GrassBlade, impact: THREE.Vector3, force: number, direction?: THREE.Vector3): void {
+    const push = direction?.clone() ?? new THREE.Vector3(
+      blade.position.x - impact.x,
+      0,
+      blade.position.z - impact.z,
+    );
+    push.y = 0;
+    if (push.lengthSq() < 0.001) push.set(1, 0, 0);
+    push.normalize();
+
+    const speed = 4 + Math.min(force, 4) * 2.2;
+    blade.velocity.set(push.x * speed, 1.8 + Math.min(force, 4) * 0.55, push.z * speed);
+    blade.rotationX = 0;
+    blade.rotationZ = 0;
+    blade.spinX = push.z * 8;
+    blade.spinZ = -push.x * 8;
+    blade.knockedAt = performance.now();
+  }
+
+  private setBladeMatrix(mesh: THREE.InstancedMesh, index: number, blade: GrassBlade, visibility = 1): void {
+    this.dummy.position.copy(blade.position);
+    this.dummy.scale.set(blade.width * visibility, blade.height * visibility, blade.width * visibility);
+    this.dummy.rotation.set(blade.rotationX, blade.rotationY, blade.rotationZ);
     this.dummy.updateMatrix();
     mesh.setMatrixAt(index, this.dummy.matrix);
   }

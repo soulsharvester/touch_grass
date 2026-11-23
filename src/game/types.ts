@@ -1,4 +1,6 @@
-export type ToolId = "gloves" | "shears" | "car" | "blaster";
+export type ToolId = "gloves" | "shears" | "car" | "blaster" | "rocket" | "gunner" | "tank";
+export type WeaponKind = "bullet" | "rocket";
+export type VehicleId = "car" | "gunner" | "tank";
 
 export interface ShopItem {
   id: ToolId;
@@ -17,6 +19,7 @@ export interface GameCallbacks {
   quit: () => void;
   shopAction: (id: ToolId) => void;
   fire: () => void;
+  togglePerspective: () => void;
   keyDown: (code: string) => void;
   keyUp: (code: string) => void;
 }

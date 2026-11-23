@@ -2,14 +2,18 @@ import * as THREE from "three";
 import { DroneDelivery } from "./DroneDelivery.js";
 import { GrassField } from "./GrassField.js";
 import { Player } from "./Player.js";
+import { ProjectileSystem } from "./ProjectileSystem.js";
 import { UI } from "./UI.js";
-import type { GameCallbacks, ShopItem, ToolId } from "./types.js";
+import type { GameCallbacks, ShopItem, ToolId, VehicleId, WeaponKind } from "./types.js";
 
 const SHOP_CATALOG: Omit<ShopItem, "owned" | "pending" | "selected">[] = [
   { id: "gloves", name: "Garden gloves", price: 35, description: "Punch through a bigger patch with a little extra force." },
   { id: "shears", name: "Big snippers", price: 110, description: "A wider reach and more blades for every sweep." },
   { id: "blaster", name: "Grass popper", price: 150, description: "Point ahead and pop a distant tuft with F." },
+  { id: "rocket", name: "Rocket launcher", price: 320, description: "A flying rocket clears a wide patch on impact." },
   { id: "car", name: "Little red car", price: 240, description: "Hop in for a faster ride and a seriously wide mow." },
+  { id: "gunner", name: "Grass rover", price: 480, description: "A quick car with a mounted grass blaster." },
+  { id: "tank", name: "Field tank", price: 650, description: "A sturdy ride with a mounted rocket launcher." },
 ];
 
 export class Game {
@@ -19,6 +23,7 @@ export class Game {
   private readonly player: Player;
   private readonly field: GrassField;
   private readonly drone: DroneDelivery;
+  private readonly projectiles: ProjectileSystem;
   private readonly ui: UI;
   private readonly keys = new Set<string>();
   private readonly pressed = new Set<string>();
@@ -29,6 +34,8 @@ export class Game {
   private blades = 0;
   private elapsed = 0;
   private harvestCooldown = 0;
+  private weaponCooldown = 0;
+  private firstPerson = false;
   private animationFrame = 0;
   private previousHudUpdate = 0;
   private lastFrameTime = performance.now();
@@ -59,8 +66,11 @@ export class Game {
     this.scene.add(sun);
 
     this.player = new Player(this.scene);
+    this.camera.add(this.player.firstPersonModel);
+    this.scene.add(this.camera);
     this.field = new GrassField(this.scene);
     this.drone = new DroneDelivery(this.scene);
+    this.projectiles = new ProjectileSystem(this.scene);
     this.field.updateAround(this.player.position);
     this.camera.position.set(0, 8, 15);
     this.camera.lookAt(this.player.position);
@@ -71,7 +81,8 @@ export class Game {
       resume: () => this.resume(),
       quit: () => this.quit(),
       shopAction: (id) => this.handleShopAction(id),
-      fire: () => this.fireTool(),
+      fire: () => this.useTool(),
+      togglePerspective: () => this.togglePerspective(),
       keyDown: (code) => this.keyDown(code),
       keyUp: (code) => this.keyUp(code),
     };
@@ -81,6 +92,9 @@ export class Game {
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
     window.addEventListener("blur", this.clearKeys);
+    const app = this.mount.closest<HTMLElement>("#app");
+    if (!app) throw new Error("The game app container is missing.");
+    app.addEventListener("pointerdown", this.handleCanvasPointerDown);
     this.resize();
     this.ui.showMenu();
     this.animate();
@@ -103,6 +117,10 @@ export class Game {
       else if (this.state === "paused") this.resume();
       return;
     }
+    if (code === "KeyP") {
+      this.togglePerspective();
+      return;
+    }
     if (!this.keys.has(code)) this.pressed.add(code);
     this.keys.add(code);
   };
@@ -114,6 +132,12 @@ export class Game {
   private readonly clearKeys = (): void => {
     this.keys.clear();
     this.pressed.clear();
+  };
+
+  private readonly handleCanvasPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0 || this.state !== "playing") return;
+    if (event.target instanceof Element && event.target.closest("button, a, [role='dialog'], .topbar, .world-label, .game-bottom, .mobile-controls")) return;
+    this.useTool();
   };
 
   private keyDown(code: string): void {
@@ -147,15 +171,22 @@ export class Game {
     this.inventory.clear();
     this.pendingPurchases.clear();
     this.equipped = null;
+    this.firstPerson = false;
     this.blades = 0;
     this.elapsed = 0;
     this.harvestCooldown = 0;
-    this.ui.setVehicleMode(false);
-    this.ui.setToolAvailable(false);
+    this.weaponCooldown = 0;
+    this.player.setFirstPerson(false);
+    this.projectiles.clear();
+    this.ui.setVehicleMode(null);
+    this.ui.setToolAvailable(null);
+    this.ui.setPerspective(false);
     this.updateShop();
     this.ui.updateHud(this.blades, this.elapsed);
     this.camera.position.set(0, 8, 15);
     this.camera.lookAt(this.player.position);
+    this.camera.fov = 42;
+    this.camera.updateProjectionMatrix();
   }
 
   private pause(): void {
@@ -178,14 +209,20 @@ export class Game {
     this.player.reset();
     this.field.clear();
     this.drone.clear();
+    this.projectiles.clear();
     this.ui.showMenu();
   }
 
   private handleShopAction(id: ToolId): void {
     if (this.inventory.has(id)) {
+      if (this.player.isDriving && !this.isVehicle(id)) {
+        this.player.toggleDriving();
+        this.ui.setVehicleMode(null);
+      }
       this.equipped = id;
       this.player.setTool(id);
-      this.ui.setToolAvailable(id === "blaster" && !this.player.isDriving);
+      this.ui.setVehicleMode(this.player.isDriving ? this.player.vehicleKind : null);
+      this.ui.setToolAvailable(this.toolActionLabel());
       this.ui.announce(`${this.itemName(id)} ready. Let's clear a little more.`);
       this.updateShop();
       return;
@@ -207,9 +244,14 @@ export class Game {
     this.drone.dropAt(this.player.position, () => {
       this.pendingPurchases.delete(id);
       this.inventory.add(id);
+      if (this.player.isDriving && !this.isVehicle(id)) {
+        this.player.toggleDriving();
+        this.ui.setVehicleMode(null);
+      }
       this.equipped = id;
       this.player.setTool(id);
-      this.ui.setToolAvailable(id === "blaster" && !this.player.isDriving);
+      this.ui.setVehicleMode(this.player.isDriving ? this.player.vehicleKind : null);
+      this.ui.setToolAvailable(this.toolActionLabel());
       this.updateShop();
       this.ui.announce(`${item.name} picked up! It's yours.`);
     });
@@ -232,18 +274,77 @@ export class Game {
     return SHOP_CATALOG.find((item) => item.id === id)?.name ?? "Tool";
   }
 
-  private fireTool(): void {
-    if (this.state !== "playing" || this.equipped !== "blaster" || this.player.isDriving) return;
-    const origin = this.player.position.clone().add(new THREE.Vector3(0, 1, 0));
-    const hit = this.field.harvestShot(origin, this.player.forward);
-    if (hit.count === 0) {
-      this.ui.announce("No grass in range. Try aiming toward a patch.");
+  private togglePerspective(): void {
+    if (this.state !== "playing") return;
+    this.firstPerson = !this.firstPerson;
+    this.player.setFirstPerson(this.firstPerson);
+    this.camera.fov = this.firstPerson ? 72 : 42;
+    this.camera.updateProjectionMatrix();
+    this.ui.setPerspective(this.firstPerson);
+  }
+
+  private useTool(): void {
+    if (this.state !== "playing") return;
+
+    if (this.player.isDriving) {
+      if (this.player.vehicleKind === "tank") this.launchWeapon("rocket");
+      else if (this.player.vehicleKind === "gunner") this.launchWeapon("bullet");
       return;
     }
 
-    this.blades += hit.blades;
+    if (this.equipped === "gloves") {
+      this.player.punch();
+      const impact = this.player.position.clone().addScaledVector(this.player.forward, 1.15);
+      this.rewardForHarvest(this.field.harvestNear(impact, 1.45, 2.4, this.player.forward));
+    } else if (this.equipped === "blaster") {
+      this.launchWeapon("bullet");
+    } else if (this.equipped === "rocket") {
+      this.launchWeapon("rocket");
+    }
+  }
+
+  private launchWeapon(kind: WeaponKind): void {
+    if (this.weaponCooldown > 0) return;
+    this.weaponCooldown = kind === "rocket" ? 0.9 : 0.2;
+
+    const origin = this.player.aimPosition;
+    const direction = this.player.forward.clone();
+    const maxDistance = kind === "rocket" ? 30 : 24;
+    const grassTarget = this.field.findShotTarget(origin, direction, maxDistance);
+    const target = grassTarget ?? origin.clone().addScaledVector(direction, maxDistance);
+    if (!grassTarget) target.y = 0.45;
+
+    this.projectiles.fire(origin, target, kind, (impact) => {
+      const result = kind === "rocket"
+        ? this.field.harvestNear(impact, 7.5, 3.8)
+        : this.field.harvestNear(impact, 1.2, 2.5, direction);
+      this.rewardForHarvest(result);
+      if (result.count === 0) this.ui.announce(kind === "rocket" ? "Rocket impact!" : "Shot missed the grass.");
+    });
+    this.ui.announce(kind === "rocket" ? "Rocket away!" : "Blaster shot!");
+  }
+
+  private rewardForHarvest(result: { count: number; blades: number }): void {
+    if (result.count === 0) return;
+    this.blades += result.blades;
     this.ui.updateHud(this.blades, this.elapsed);
-    this.ui.announce(`Pop! +${hit.blades} blades`);
+    this.ui.announce(`+${result.blades} blades · ${result.count} tufts cleared`);
+  }
+
+  private toolActionLabel(): string | null {
+    if (this.player.isDriving) {
+      if (this.player.vehicleKind === "tank") return "Fire rockets";
+      if (this.player.vehicleKind === "gunner") return "Fire blaster";
+      return null;
+    }
+    if (this.equipped === "gloves") return "Punch";
+    if (this.equipped === "blaster") return "Fire grass popper";
+    if (this.equipped === "rocket") return "Fire rocket";
+    return null;
+  }
+
+  private isVehicle(id: ToolId): id is VehicleId {
+    return id === "car" || id === "gunner" || id === "tank";
   }
 
   private animate = (): void => {
@@ -255,6 +356,7 @@ export class Game {
     if (this.state === "playing") {
       this.elapsed += delta;
       this.harvestCooldown -= delta;
+      this.weaponCooldown = Math.max(0, this.weaponCooldown - delta);
       const moveX = Number(this.keys.has("KeyD") || this.keys.has("ArrowRight")) - Number(this.keys.has("KeyA") || this.keys.has("ArrowLeft"));
       const moveZ = Number(this.keys.has("KeyS") || this.keys.has("ArrowDown")) - Number(this.keys.has("KeyW") || this.keys.has("ArrowUp"));
       const jump = this.pressed.has("Space") || this.pressed.has("ArrowUp");
@@ -263,24 +365,31 @@ export class Game {
       this.player.update(delta, moveX, moveZ, jump);
       this.pressed.clear();
 
-      if (enterCar && this.inventory.has("car")) {
+      const selectedVehicle = this.player.selectedVehicle;
+      if (enterCar && selectedVehicle && this.inventory.has(selectedVehicle)) {
         const driving = this.player.toggleDriving();
-        this.ui.setVehicleMode(driving);
-        this.ui.setToolAvailable(this.equipped === "blaster" && !driving);
-        this.ui.announce(driving ? "Road trip! Hold W to cruise." : "Back on your own two feet.");
+        this.ui.setVehicleMode(driving ? selectedVehicle : null);
+        this.ui.setToolAvailable(this.toolActionLabel());
+        this.ui.announce(driving ? `${this.itemName(selectedVehicle)} ready. Hold W to drive.` : "Back on your own two feet.");
       }
 
-      if (fire) this.fireTool();
+      if (fire) this.useTool();
 
       this.field.updateAround(this.player.position);
-      this.field.updateRegrowth(now);
+      this.field.updateRegrowth(now, delta);
       this.drone.update(delta, this.player.position);
+      this.projectiles.update(delta);
 
       if (this.harvestCooldown <= 0) {
-        const baseRadius = this.player.isDriving ? 3.5 : 1.2;
-        const radius = this.equipped === "shears" ? 3.4 : this.equipped === "gloves" ? 2 : baseRadius;
+        const vehicleRadius = this.player.vehicleKind === "tank" ? 4.5 : this.player.vehicleKind === "gunner" ? 4 : 3.5;
+        const baseRadius = this.player.isDriving ? vehicleRadius : 1.2;
+        const radius = !this.player.isDriving && this.equipped === "shears"
+          ? 3.4
+          : !this.player.isDriving && this.equipped === "gloves" ? 2 : baseRadius;
         // Moving faster, jumping, and using a tool all make each grass impact more rewarding.
-        const impactForce = this.player.isDriving ? 2.2 : 0.65 + Math.min(this.player.speed / 12, 1);
+        const impactForce = this.player.isDriving
+          ? this.player.vehicleKind === "tank" ? 2.8 : this.player.vehicleKind === "gunner" ? 2.4 : 2.2
+          : 0.65 + Math.min(this.player.speed / 12, 1);
         const force = impactForce * (this.equipped === "shears" ? 1.7 : this.equipped === "gloves" ? 1.35 : 1);
         const heightBoost = 1 + this.player.position.y * 0.22;
         const result = this.field.harvestNear(this.player.position, radius, force * heightBoost);
@@ -304,6 +413,13 @@ export class Game {
   };
 
   private updateCamera(delta: number): void {
+    if (this.firstPerson) {
+      const viewPosition = this.player.viewPosition;
+      this.camera.position.lerp(viewPosition, 1 - Math.exp(-delta * 12));
+      this.camera.lookAt(viewPosition.clone().addScaledVector(this.player.forward, 30));
+      return;
+    }
+
     const desiredPosition = new THREE.Vector3(
       this.player.position.x + this.player.forward.x * 4,
       this.player.position.y + 7.5,
