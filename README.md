@@ -23,3 +23,5 @@ The field streams in as you explore, and cleared grass grows back after a short 
 ## Publish with GitHub Pages
 
 The included GitHub Actions workflow builds and deploys the site whenever code is pushed to `main`. In the repository settings, open **Pages** and set the build source to **GitHub Actions**. The workflow publishes the generated `dist` folder; Vite uses relative asset URLs so the game works at the repository’s Pages URL.
+
+If the first deployment ran before Pages was enabled, rerun **Deploy to GitHub Pages** from the repository’s **Actions** tab after selecting the GitHub Actions source.
